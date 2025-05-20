@@ -1,0 +1,58 @@
+definitions:
+  main.RatioResponse:
+    properties:
+      fair:
+        type: number
+      sigma:
+        type: number
+      spot:
+        type: number
+      updated:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /healthz:
+    get:
+      description: Returns 200 if service is healthy
+      responses:
+        "200":
+          description: OK
+      summary: Health check
+      tags:
+      - probes
+  /metrics:
+    get:
+      description: Exposes Prometheus-compatible metrics
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: OK
+      summary: Prometheus metrics
+      tags:
+      - metrics
+  /ratio:
+    get:
+      description: Returns the EMA-based fair price ratio, spot price, and sigma
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.RatioResponse'
+      summary: Get fair price ratio
+      tags:
+      - ratio
+  /readyz:
+    get:
+      description: Returns 200 if service is ready
+      responses:
+        "200":
+          description: OK
+      summary: Readiness check
+      tags:
+      - probes
+swagger: "2.0"

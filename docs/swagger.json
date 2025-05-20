@@ -1,0 +1,92 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "contact": {}
+    },
+    "paths": {
+        "/healthz": {
+            "get": {
+                "description": "Returns 200 if service is healthy",
+                "tags": [
+                    "probes"
+                ],
+                "summary": "Health check",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                }
+            }
+        },
+        "/metrics": {
+            "get": {
+                "description": "Exposes Prometheus-compatible metrics",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "metrics"
+                ],
+                "summary": "Prometheus metrics",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                }
+            }
+        },
+        "/ratio": {
+            "get": {
+                "description": "Returns the EMA-based fair price ratio, spot price, and sigma",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "ratio"
+                ],
+                "summary": "Get fair price ratio",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.RatioResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/readyz": {
+            "get": {
+                "description": "Returns 200 if service is ready",
+                "tags": [
+                    "probes"
+                ],
+                "summary": "Readiness check",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "main.RatioResponse": {
+            "type": "object",
+            "properties": {
+                "fair": {
+                    "type": "number"
+                },
+                "sigma": {
+                    "type": "number"
+                },
+                "spot": {
+                    "type": "number"
+                },
+                "updated": {
+                    "type": "string"
+                }
+            }
+        }
+    }
+}
