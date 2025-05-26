@@ -84,7 +84,6 @@ func (e *Engine) ProcessTick(t Tick) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// extract the spot price
 	price := t.Prices.Spot
 
 	// --- ring buffer update (unchanged) ---
@@ -106,9 +105,8 @@ func (e *Engine) ProcessTick(t Tick) {
 
 	// --- compute rolling sigma (unchanged) ---
 	mean := e.sum / float64(e.count)
-	var variance float64
 	if e.count > 1 {
-		variance = e.sumsq/float64(e.count) - mean*mean
+		variance := e.sumsq/float64(e.count) - mean*mean
 		if variance < 0 {
 			variance = 0
 		}
@@ -117,20 +115,33 @@ func (e *Engine) ProcessTick(t Tick) {
 		e.sigma = 0
 	}
 
-	// --- EMA update: seed on first tick ---
+	// --- EMA update with dynamic α until warm-up complete ---
+	// period is how many ticks you want in your EMA window;
+	// here we assume period == len(e.buffer), but you can pick another.
+	period := len(e.buffer)
+
+	// seed on first tick
 	if e.count == 1 {
-		// First data point: initialize EMA exactly to the spot price
 		e.ema = price
 	} else {
-		// standard EMA step with ±3σ clamping
+		// choose α_eff = 2/(k+1) for k < period, else use steady α = 2/(period+1)
+		var alphaEff float64
+		if e.count < period {
+			alphaEff = 2.0 / (float64(e.count) + 1.0)
+		} else {
+			alphaEff = e.alpha
+		}
+
+		// clamp the innovation to ±3σ
 		delta := price - e.ema
 		thr := 3 * e.sigma
-		if delta > thr {
+		switch {
+		case delta > thr:
 			delta = thr
-		} else if delta < -thr {
+		case delta < -thr:
 			delta = -thr
 		}
-		e.ema += e.alpha * delta
+		e.ema += alphaEff * delta
 	}
 
 	e.lastUpdated = time.UnixMilli(t.TS)
