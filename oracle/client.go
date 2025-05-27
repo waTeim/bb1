@@ -21,11 +21,11 @@ const (
 	DexPairAddress = "7EdQQSdkGvir2FMnuSsriqsksz44Cqf3fR7yRbbX6nX4"
 )
 
-// PriceData holds spot ratio and USD price (USD only populated from DexScreener).
-// Spot is the BILLY/SOL ratio; USD is BILLY price in USD.
+// PriceData holds the three key price relationships between BILLY, SOL, and USD.
 type PriceData struct {
-	Spot float64
-	USD  float64
+	BillySol float64 // how many SOL per 1 BILLY (formerly Spot)
+	BillyUSD float64 // how many USD per 1 BILLY (formerly USD)
+	SolUSD   float64 // how many USD per 1 SOL
 }
 
 // PriceClient fetches prices from multiple upstreams, requiring an API key for Coingecko.
@@ -96,7 +96,12 @@ func (pc *PriceClient) FetchJupiter(ctx context.Context) (PriceData, error) {
 		return PriceData{}, err
 	}
 
-	return PriceData{Spot: price}, nil
+	// Populate the new PriceData struct:
+	return PriceData{
+		BillySol: price, // what Jupiter gave us
+		BillyUSD: 0,     // not provided here
+		SolUSD:   0,     // not provided here
+	}, nil
 }
 
 // FetchCoingecko retrieves the BILLY/SOL spot price by querying both tokens vs USD in a single call and dividing.
@@ -151,11 +156,14 @@ func (pc *PriceClient) FetchCoingecko(ctx context.Context) (PriceData, error) {
 		return PriceData{}, fmt.Errorf("invalid Coingecko data: %+v", data)
 	}
 
-	spot := billyUSD / solUSD
-	return PriceData{Spot: spot, USD: billyUSD}, nil
+	// Build and return the enriched PriceData
+	return PriceData{
+		BillySol: billyUSD / solUSD, // BILLY→SOL ratio
+		BillyUSD: billyUSD,          // BILLY→USD price
+		SolUSD:   solUSD,            // SOL→USD price
+	}, nil
 }
 
-// FetchDexScreener remains unchanged...
 // FetchDexScreener retrieves BILLY/SOL spot and USD price from DexScreener using the pair address.
 func (pc *PriceClient) FetchDexScreener(ctx context.Context) (PriceData, error) {
 	// Query DexScreener by pairAddress
@@ -203,5 +211,15 @@ func (pc *PriceClient) FetchDexScreener(ctx context.Context) (PriceData, error) 
 		return PriceData{}, err
 	}
 
-	return PriceData{Spot: native, USD: usd}, nil
+	// Compute SOL→USD = (BILLY→USD) / (BILLY→SOL)
+	var solUsd float64
+	if native != 0 {
+		solUsd = usd / native
+	}
+
+	return PriceData{
+		BillySol: native, // BILLY→SOL
+		BillyUSD: usd,    // BILLY→USD
+		SolUSD:   solUsd, // SOL→USD
+	}, nil
 }

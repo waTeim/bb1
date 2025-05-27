@@ -122,10 +122,18 @@ func startPipeline(ctx context.Context, cfg *Config, rdb *redis.Client) {
 	e := engine.New(cfg.EmaWindow)
 	eInst = e
 
-	// Restore snapshot if <24h
+	// Attempt to restore a recent snapshot (<24h old)
 	if snap, err := store.Load(ctx); err == nil {
 		if time.Since(snap.Updated) < 24*time.Hour {
-			e.Restore(snap.Ticks, snap.EMA, snap.Sigma, snap.Updated)
+			e.Restore(
+				snap.Ticks,
+				// EMAs
+				snap.EMABillySol, snap.EMABillyUSD, snap.EMASolUSD,
+				// Sigmas
+				snap.SigmaBillySol, snap.SigmaBillyUSD, snap.SigmaSolUSD,
+				// last update timestamp
+				snap.Updated,
+			)
 			slog.Info("restored engine state", "updated", snap.Updated)
 		} else {
 			slog.Warn("snapshot too old, ignoring", "updated", snap.Updated)
@@ -232,7 +240,11 @@ func initHTTP() *echo.Echo {
 	// Routes
 	e.GET("/healthz", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
 	e.GET("/readyz", func(c echo.Context) error {
-		_, _, _, updated := eInst.Snapshot()
+		// Snapshot now returns:
+		//   emaBillySol, emaBillyUSD, emaSolUSD,
+		//   sigmaBillySol, sigmaBillyUSD, sigmaSolUSD,
+		//   ticks, updated
+		_, _, _, _, _, _, _, updated := eInst.Snapshot()
 		if time.Since(updated) > 30*time.Second {
 			return c.NoContent(http.StatusServiceUnavailable)
 		}

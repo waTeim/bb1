@@ -69,19 +69,22 @@ func NewAggregator(pc *PriceClient, cfg AggregatorConfig) *Aggregator {
 }
 
 // FetchAll fetches prices from all sources, honoring backoff, and returns the mean spot price.
+// FetchAll fetches prices from all sources, honors backoff, and returns the mean BILLY→SOL, BILLY→USD, and SOL→USD prices.
 func (ag *Aggregator) FetchAll(ctx context.Context) (PriceData, error) {
 	now := time.Now()
 	ag.mu.Lock()
 	defer ag.mu.Unlock()
 
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	var hitsSpot []float64
-	var hitsUSD []float64
-	var errs []error
+	var (
+		mu           sync.Mutex
+		wg           sync.WaitGroup
+		hitsBillySol []float64
+		hitsBillyUSD []float64
+		hitsSolUSD   []float64
+		errs         []error
+	)
 
 	for src, st := range ag.status {
-		// check backoff
 		if now.Before(st.nextAttempt) {
 			slog.Info("skipping source due to backoff", "source", src, "nextAttempt", st.nextAttempt)
 			continue
@@ -90,22 +93,24 @@ func (ag *Aggregator) FetchAll(ctx context.Context) (PriceData, error) {
 		wg.Add(1)
 		go func(src Source, st *status) {
 			defer wg.Done()
-			var pd PriceData
-			var err error
-			switch src {
-			case SourceJupiter:
-				pd, err = ag.pc.FetchJupiter(ctx)
-			case SourceCoingecko:
-				pd, err = ag.pc.FetchCoingecko(ctx)
-			case SourceDexScreener:
-				pd, err = ag.pc.FetchDexScreener(ctx)
-			}
+
+			pd, err := func() (PriceData, error) {
+				switch src {
+				case SourceJupiter:
+					return ag.pc.FetchJupiter(ctx)
+				case SourceCoingecko:
+					return ag.pc.FetchCoingecko(ctx)
+				case SourceDexScreener:
+					return ag.pc.FetchDexScreener(ctx)
+				}
+				return PriceData{}, nil
+			}()
 
 			mu.Lock()
 			defer mu.Unlock()
 
 			if err != nil {
-				// record error and apply backoff
+				// apply backoff
 				st.lastError = time.Now()
 				st.backoff *= 2
 				if st.backoff > ag.cfg.BackoffMax {
@@ -114,51 +119,77 @@ func (ag *Aggregator) FetchAll(ctx context.Context) (PriceData, error) {
 				st.nextAttempt = time.Now().Add(st.backoff)
 				slog.Warn("source fetch error, backing off", "source", src, "error", err, "backoff", st.backoff)
 				errs = append(errs, fmt.Errorf("%s: %w", src, err))
-			} else {
-				// Skip zero spot (no data)
-				if pd.Spot == 0.0 {
-					slog.Warn("source returned zero spot price, skipping", "source", src)
-				} else {
-					// accept spot
-					st.lastSuccess = time.Now()
-					st.backoff = ag.cfg.BackoffInitial
-					hitsSpot = append(hitsSpot, pd.Spot)
-				}
-				// Skip zero USD (might not always be provided)
-				if pd.USD == 0.0 {
-					slog.Warn("source returned zero USD price, skipping USD", "source", src)
-				} else {
-					hitsUSD = append(hitsUSD, pd.USD)
-				}
-				if pd.Spot != 0.0 {
-					slog.Info("source fetch success", "source", src, "spot", pd.Spot, "usd", pd.USD)
-				}
+				return
 			}
+
+			// BILLY→SOL
+			if pd.BillySol == 0 {
+				slog.Warn("source returned zero BILLY→SOL price, skipping", "source", src)
+			} else {
+				st.lastSuccess = time.Now()
+				st.backoff = ag.cfg.BackoffInitial
+				hitsBillySol = append(hitsBillySol, pd.BillySol)
+			}
+
+			// BILLY→USD
+			if pd.BillyUSD == 0 {
+				slog.Warn("source returned zero BILLY→USD price, skipping", "source", src)
+			} else {
+				hitsBillyUSD = append(hitsBillyUSD, pd.BillyUSD)
+			}
+
+			// SOL→USD
+			if pd.SolUSD == 0 {
+				slog.Warn("source returned zero SOL→USD price, skipping", "source", src)
+			} else {
+				hitsSolUSD = append(hitsSolUSD, pd.SolUSD)
+			}
+
+			slog.Info("source fetch success",
+				"source", src,
+				"billySol", pd.BillySol,
+				"billyUSD", pd.BillyUSD,
+				"solUSD", pd.SolUSD,
+			)
 		}(src, st)
 	}
 
 	wg.Wait()
 
-	if len(hitsSpot) == 0 {
-		return PriceData{}, fmt.Errorf("all sources failed or returned zero spot: %v", errs)
+	if len(hitsBillySol) == 0 {
+		return PriceData{}, fmt.Errorf("all sources failed or returned zero BILLY→SOL: %v", errs)
 	}
 
-	// average spot
-	sumSpot := 0.0
-	for _, v := range hitsSpot {
-		sumSpot += v
+	// average BILLY→SOL
+	sum := 0.0
+	for _, v := range hitsBillySol {
+		sum += v
 	}
-	meanSpot := sumSpot / float64(len(hitsSpot))
+	meanBillySol := sum / float64(len(hitsBillySol))
 
-	// average USD if any
-	meanUSD := 0.0
-	if len(hitsUSD) > 0 {
-		sumUSD := 0.0
-		for _, v := range hitsUSD {
-			sumUSD += v
+	// average BILLY→USD
+	meanBillyUSD := 0.0
+	if len(hitsBillyUSD) > 0 {
+		sum = 0.0
+		for _, v := range hitsBillyUSD {
+			sum += v
 		}
-		meanUSD = sumUSD / float64(len(hitsUSD))
+		meanBillyUSD = sum / float64(len(hitsBillyUSD))
 	}
 
-	return PriceData{Spot: meanSpot, USD: meanUSD}, nil
+	// average SOL→USD
+	meanSolUSD := 0.0
+	if len(hitsSolUSD) > 0 {
+		sum = 0.0
+		for _, v := range hitsSolUSD {
+			sum += v
+		}
+		meanSolUSD = sum / float64(len(hitsSolUSD))
+	}
+
+	return PriceData{
+		BillySol: meanBillySol,
+		BillyUSD: meanBillyUSD,
+		SolUSD:   meanSolUSD,
+	}, nil
 }

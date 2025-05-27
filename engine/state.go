@@ -18,30 +18,56 @@ type Tick struct {
 	TS     int64 // epoch milliseconds
 }
 
-// Engine processes ticks into an EMA-based fair ratio with noise clamping
-// and rolling sigma over a fixed-size window.
-// ProcessTick is thread-safe.
+// Engine processes ticks into three EMAs (BILLY→SOL, BILLY→USD, SOL→USD)
+// with ±3σ noise‐clamping and rolling σ over a fixed‐size window.
+// ProcessTick is thread‐safe.
 type Engine struct {
-	alpha float64
+	alpha float64 // steady‐state EMA smoothing factor (2/(N+1))
 
-	mu    sync.RWMutex
-	ema   float64
-	sigma float64
+	mu sync.RWMutex
 
-	buffer []float64
-	tsBuf  []int64
-	pos    int
-	count  int
+	// current Spot
+	billySol float64
+	billyUSD float64
+	solUSD   float64
+
+	// current EMAs
+	emaBillySol float64
+	emaBillyUSD float64
+	emaSolUSD   float64
+
+	// rolling‐window state (shared size/time buffer)
+	bufferBillySol []float64
+	bufferBillyUSD []float64
+	bufferSolUSD   []float64
+	tsBuf          []int64
+	pos            int
+	count          int
+
 	// rolling sums for mean & variance
-	sum   float64
-	sumsq float64
+	sumBillySol, sumsqBillySol float64
+	sumBillyUSD, sumsqBillyUSD float64
+	sumSolUSD, sumsqSolUSD     float64
+
+	// rolling σ for each series
+	sigmaBillySol float64
+	sigmaBillyUSD float64
+	sigmaSolUSD   float64
 
 	lastUpdated time.Time
 
 	// Prometheus metrics
-	fairGauge  prometheus.Gauge
-	spotGauge  prometheus.Gauge
-	sigmaGauge prometheus.Gauge
+	spotBillySolGauge prometheus.Gauge
+	spotBillyUSDGauge prometheus.Gauge
+	spotSolUSDGauge   prometheus.Gauge
+
+	emaBillySolGauge prometheus.Gauge
+	emaBillyUSDGauge prometheus.Gauge
+	emaSolUSDGauge   prometheus.Gauge
+
+	sigmaBillySolGauge prometheus.Gauge
+	sigmaBillyUSDGauge prometheus.Gauge
+	sigmaSolUSDGauge   prometheus.Gauge
 }
 
 const (
@@ -51,110 +77,231 @@ const (
 	downThreshold = 120 * time.Second
 )
 
-// New creates and registers a new Engine with EMA window N for alpha.
+// New creates and registers a new Engine with a rolling window of size `window`
+// and an N-tick EMA (α = 2/(window+1)) for each of the three price legs:
+//   - BILLY→SOL, BILLY→USD, and SOL→USD.
 func New(window int) *Engine {
-	alpha := 2.0 / (float64(window) + 1)
+	// 1) Compute steady‐state α = 2/(N+1)
+	alpha := 2.0 / (float64(window) + 1.0)
 
-	fair := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "fair_ratio",
-		Help: "EMA-based fair price ratio",
+	// 2) Create gauges for BILLY→SOL
+	spotBillySolG := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bb1_spot_billy_sol_price",
+		Help: "Last observed price of 1 BILLY in SOL",
 	})
-	spot := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "spot_ratio",
-		Help: "Last spot price ratio",
+	emaBillySolG := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bb1_ema_billy_sol_price",
+		Help: "EMA of BILLY→SOL price",
 	})
-	sig := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "ratio_sigma",
-		Help: "Rolling standard deviation of spot price",
+	sigmaBillySolG := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bb1_sigma_billy_sol_price",
+		Help: "Rolling standard deviation of BILLY→SOL price",
 	})
-	prometheus.MustRegister(fair, spot, sig)
 
+	// 3) Create gauges for BILLY→USD
+	spotBillyUSDG := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bb1_spot_billy_usd_price",
+		Help: "Last observed price of 1 BILLY in USD",
+	})
+	emaBillyUSDG := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bb1_ema_billy_usd_price",
+		Help: "EMA of BILLY→USD price",
+	})
+	sigmaBillyUSDG := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bb1_sigma_billy_usd_price",
+		Help: "Rolling standard deviation of BILLY→USD price",
+	})
+
+	// 4) Create gauges for SOL→USD
+	spotSolUSDG := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bb1_spot_sol_usd_price",
+		Help: "Last observed price of 1 SOL in USD",
+	})
+	emaSolUSDG := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bb1_ema_sol_usd_price",
+		Help: "EMA of SOL→USD price",
+	})
+	sigmaSolUSDG := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bb1_sigma_sol_usd_price",
+		Help: "Rolling standard deviation of SOL→USD price",
+	})
+
+	// 5) Register all nine gauges
+	prometheus.MustRegister(
+		spotBillySolG, emaBillySolG, sigmaBillySolG,
+		spotBillyUSDG, emaBillyUSDG, sigmaBillyUSDG,
+		spotSolUSDG, emaSolUSDG, sigmaSolUSDG,
+	)
+
+	// 6) Construct the Engine with empty buffers of length `window`
 	return &Engine{
-		alpha:      alpha,
-		buffer:     make([]float64, ringSize),
-		tsBuf:      make([]int64, ringSize),
-		fairGauge:  fair,
-		spotGauge:  spot,
-		sigmaGauge: sig,
+		alpha:          alpha,
+		bufferBillySol: make([]float64, window),
+		bufferBillyUSD: make([]float64, window),
+		bufferSolUSD:   make([]float64, window),
+		tsBuf:          make([]int64, window),
+		// Prometheus metrics
+		spotBillySolGauge:  spotBillySolG,
+		emaBillySolGauge:   emaBillySolG,
+		sigmaBillySolGauge: sigmaBillySolG,
+		spotBillyUSDGauge:  spotBillyUSDG,
+		emaBillyUSDGauge:   emaBillyUSDG,
+		sigmaBillyUSDGauge: sigmaBillyUSDG,
+		spotSolUSDGauge:    spotSolUSDG,
+		emaSolUSDGauge:     emaSolUSDG,
+		sigmaSolUSDGauge:   sigmaSolUSDG,
 	}
 }
 
-// ProcessTick ingests a tick: updates ring buffer, computes sigma, clamps delta, updates EMA.
+// updateBuffer rolls your ring buffer & maintains sum/sumsq for one series (SOL or USD).
+// - price: the new tick price for this series
+// - buf:   the slice backing that series’ ring buffer (e.bufferSOL or e.bufferUSD)
+// - sum:   pointer to that series’ rolling sum (e.sumSOL or e.sumUSD)
+// - sumsq: pointer to that series’ rolling sum of squares (e.sumsqSOL or e.sumsqUSD)
+// - ts:    the timestamp for this tick
+func (e *Engine) updateBuffer(
+	price float64,
+	buf []float64,
+	sum *float64,
+	sumsq *float64,
+	ts int64,
+) {
+	var old float64
+
+	// still filling up
+	if e.count < len(buf) {
+		*sum += price
+		*sumsq += price * price
+		buf[e.pos] = price
+		e.tsBuf[e.pos] = ts
+		e.count++
+	} else {
+		// buffer full: remove oldest, add new
+		old = buf[e.pos]
+		*sum += price - old
+		*sumsq += price*price - old*old
+		buf[e.pos] = price
+		e.tsBuf[e.pos] = ts
+	}
+
+	// advance ring position
+	e.pos = (e.pos + 1) % len(buf)
+}
+
+// computeSigma returns the rolling standard deviation given the rolling sum and sum of squares.
+// It uses e.count as the current number of samples.
+func (e *Engine) computeSigma(sum, sumsq float64) float64 {
+	if e.count < 2 {
+		return 0
+	}
+	mean := sum / float64(e.count)
+	// variance = E[x²] − (E[x])²
+	v := sumsq/float64(e.count) - mean*mean
+	if v < 0 {
+		v = 0
+	}
+	return math.Sqrt(v)
+}
+
+// updateEMA applies the dynamic-α warmup and ±3σ clamp.
+// `target` should point at one of e.emaBillySol, e.emaBillyUSD, or e.emaSolUSD.
+func (e *Engine) updateEMA(target *float64, price, sigma float64) {
+	// 1) Seed on the very first tick
+	if e.count == 1 {
+		*target = price
+		return
+	}
+
+	// 2) Determine the effective α:
+	//    - while warming up (count < window), α = 2/(count+1)
+	//    - afterwards, α = e.alpha (which is 2/(window+1))
+	period := len(e.bufferBillySol) // all three buffers share the same window size
+	var alphaEff float64
+	if e.count < period {
+		alphaEff = 2.0 / (float64(e.count) + 1.0)
+	} else {
+		alphaEff = e.alpha
+	}
+
+	// 3) Compute the innovation, clamped to ±3σ
+	delta := price - *target
+	thr := 3 * sigma
+	if delta > thr {
+		delta = thr
+	} else if delta < -thr {
+		delta = -thr
+	}
+
+	// 4) Update the EMA
+	*target += alphaEff * delta
+}
+
+// updateMetrics pushes all nine Prometheus gauges for the three price legs:
+//
+//	– BILLY→SOL: spot, EMA, σ
+//	– BILLY→USD: spot, EMA, σ
+//	– SOL→USD:   spot, EMA, σ
+func (e *Engine) updateMetrics() {
+	// BILLY→SOL series
+	e.spotBillySolGauge.Set(e.billySol)
+	e.emaBillySolGauge.Set(e.emaBillySol)
+	e.sigmaBillySolGauge.Set(e.sigmaBillySol)
+
+	// BILLY→USD series
+	e.spotBillyUSDGauge.Set(e.billyUSD)
+	e.emaBillyUSDGauge.Set(e.emaBillyUSD)
+	e.sigmaBillyUSDGauge.Set(e.sigmaBillyUSD)
+
+	// SOL→USD series
+	e.spotSolUSDGauge.Set(e.solUSD)
+	e.emaSolUSDGauge.Set(e.emaSolUSD)
+	e.sigmaSolUSDGauge.Set(e.sigmaSolUSD)
+}
+
+// ProcessTick ingests a tick: updates three buffers (BILLY→SOL, BILLY→USD, SOL→USD),
+// computes each σ, applies the EMA update with ±3σ clamp, and pushes all 9 metrics.
 func (e *Engine) ProcessTick(t Tick) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	price := t.Prices.Spot
+	// 1) Extract the three price legs + timestamp
+	e.billySol = t.Prices.BillySol
+	e.billyUSD = t.Prices.BillyUSD
+	e.solUSD = t.Prices.SolUSD
+	ts := t.TS
 
-	// --- ring buffer update (unchanged) ---
-	var old float64
-	if e.count < len(e.buffer) {
-		e.buffer[e.pos] = price
-		e.tsBuf[e.pos] = t.TS
-		e.sum += price
-		e.sumsq += price * price
-		e.count++
-	} else {
-		old = e.buffer[e.pos]
-		e.buffer[e.pos] = price
-		e.tsBuf[e.pos] = t.TS
-		e.sum += price - old
-		e.sumsq += price*price - old*old
-	}
-	e.pos = (e.pos + 1) % len(e.buffer)
+	// 2) Update rolling buffers for each leg
+	e.updateBuffer(e.billySol, e.bufferBillySol, &e.sumBillySol, &e.sumsqBillySol, ts)
+	e.updateBuffer(e.billyUSD, e.bufferBillyUSD, &e.sumBillyUSD, &e.sumsqBillyUSD, ts)
+	e.updateBuffer(e.solUSD, e.bufferSolUSD, &e.sumSolUSD, &e.sumsqSolUSD, ts)
 
-	// --- compute rolling sigma (unchanged) ---
-	mean := e.sum / float64(e.count)
-	if e.count > 1 {
-		variance := e.sumsq/float64(e.count) - mean*mean
-		if variance < 0 {
-			variance = 0
-		}
-		e.sigma = math.Sqrt(variance)
-	} else {
-		e.sigma = 0
-	}
+	// 3) Compute rolling sigmas
+	e.sigmaBillySol = e.computeSigma(e.sumBillySol, e.sumsqBillySol)
+	e.sigmaBillyUSD = e.computeSigma(e.sumBillyUSD, e.sumsqBillyUSD)
+	e.sigmaSolUSD = e.computeSigma(e.sumSolUSD, e.sumsqSolUSD)
 
-	// --- EMA update with dynamic α until warm-up complete ---
-	// period is how many ticks you want in your EMA window;
-	// here we assume period == len(e.buffer), but you can pick another.
-	period := len(e.buffer)
+	// 4) Update EMAs (with dynamic-α warmup and ±3σ clamp)
+	e.updateEMA(&e.emaBillySol, e.billySol, e.sigmaBillySol)
+	e.updateEMA(&e.emaBillyUSD, e.billyUSD, e.sigmaBillyUSD)
+	e.updateEMA(&e.emaSolUSD, e.solUSD, e.sigmaSolUSD)
 
-	// seed on first tick
-	if e.count == 1 {
-		e.ema = price
-	} else {
-		// choose α_eff = 2/(k+1) for k < period, else use steady α = 2/(period+1)
-		var alphaEff float64
-		if e.count < period {
-			alphaEff = 2.0 / (float64(e.count) + 1.0)
-		} else {
-			alphaEff = e.alpha
-		}
+	// 5) Record last update time
+	e.lastUpdated = time.UnixMilli(ts)
 
-		// clamp the innovation to ±3σ
-		delta := price - e.ema
-		thr := 3 * e.sigma
-		switch {
-		case delta > thr:
-			delta = thr
-		case delta < -thr:
-			delta = -thr
-		}
-		e.ema += alphaEff * delta
-	}
+	// 6) Push all metrics (3 spot + 3 EMA + 3 σ)
+	e.updateMetrics()
 
-	e.lastUpdated = time.UnixMilli(t.TS)
-
-	// --- update Prometheus metrics ---
-	e.fairGauge.Set(e.ema)
-	e.spotGauge.Set(price)
-	e.sigmaGauge.Set(e.sigma)
-
+	// 7) Debug log
 	slog.Debug("engine tick",
-		"ema", e.ema,
-		"sigma", e.sigma,
-		"spot", price,
+		"ema_billySol", e.emaBillySol,
+		"ema_billyUSD", e.emaBillyUSD,
+		"ema_solUSD", e.emaSolUSD,
+		"sigma_billySol", e.sigmaBillySol,
+		"sigma_billyUSD", e.sigmaBillyUSD,
+		"sigma_solUSD", e.sigmaSolUSD,
+		"spot_billySol", e.billySol,
+		"spot_billyUSD", e.billyUSD,
+		"spot_solUSD", e.solUSD,
 	)
 }
 
@@ -180,14 +327,19 @@ func StartPoller(ctx context.Context, agg *oracle.Aggregator, tickCh chan<- Tick
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			prices, err := agg.FetchAll(ctx)
+			pd, err := agg.FetchAll(ctx)
 			if err != nil {
 				slog.Warn("poller: all sources failed", "error", err)
 				continue
 			}
 			now := time.Now().UnixMilli()
-			slog.Info("poller: publishing aggregated tick", "spot", prices.Spot, "usd", prices.USD, "ts", now)
-			tickCh <- Tick{Prices: prices, TS: now}
+			slog.Info("poller: publishing aggregated tick",
+				"billySol", pd.BillySol,
+				"billyUSD", pd.BillyUSD,
+				"solUSD", pd.SolUSD,
+				"ts", now,
+			)
+			tickCh <- Tick{Prices: pd, TS: now}
 		}
 	}
 }

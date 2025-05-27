@@ -6,58 +6,103 @@ import (
 	"github.com/wat.im/bb1/oracle"
 )
 
-// Snapshot extracts the current engine state: EMA, sigma, tick buffer, and last update time.
-// The returned slice of Tick is in chronological order (oldest first).
-func (e *Engine) Snapshot() (ema, sigma float64, ticks []Tick, updated time.Time) {
+// Snapshot extracts the current engine state: EMAs and σ’s for each price leg,
+// tick buffer, and last update time.
+// Returned slice of Tick is in chronological order (oldest first).
+func (e *Engine) Snapshot() (
+	emaBillySol, emaBillyUSD, emaSolUSD float64,
+	sigmaBillySol, sigmaBillyUSD, sigmaSolUSD float64,
+	ticks []Tick,
+	updated time.Time,
+) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	ema = e.ema
-	sigma = e.sigma
+	// Current EMAs & σ’s
+	emaBillySol = e.emaBillySol
+	emaBillyUSD = e.emaBillyUSD
+	emaSolUSD = e.emaSolUSD
+	sigmaBillySol = e.sigmaBillySol
+	sigmaBillyUSD = e.sigmaBillyUSD
+	sigmaSolUSD = e.sigmaSolUSD
 	updated = e.lastUpdated
 
-	// collect ticks in chronological order
+	// Collect ticks in chronological order
 	n := e.count
 	ticks = make([]Tick, n)
+	window := len(e.bufferBillySol) // same for all buffers
 	for i := 0; i < n; i++ {
-		idx := (e.pos - n + i + len(e.buffer)) % len(e.buffer)
-		spot := e.buffer[idx]
-		ts := e.tsBuf[idx]
+		idx := (e.pos - n + i + window) % window
 		ticks[i] = Tick{
-			Prices: oracle.PriceData{Spot: spot},
-			TS:     ts,
+			Prices: oracle.PriceData{
+				BillySol: e.bufferBillySol[idx],
+				BillyUSD: e.bufferBillyUSD[idx],
+				SolUSD:   e.bufferSolUSD[idx],
+			},
+			TS: e.tsBuf[idx],
 		}
 	}
 	return
 }
 
-// Restore replaces the engine's state with a snapshot: tick buffer, EMA, sigma, and last update time.
-func (e *Engine) Restore(saved []Tick, emaVal, sigmaVal float64, updated time.Time) {
+// Restore replaces the engine's state with a snapshot: tick buffer, EMAs, σ’s, and last update time.
+func (e *Engine) Restore(
+	saved []Tick,
+	emaBillySol, emaBillyUSD, emaSolUSD float64,
+	sigmaBillySol, sigmaBillyUSD, sigmaSolUSD float64,
+	updated time.Time,
+) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// trim to buffer size if necessary
+	// Determine window size from buffer length
+	window := len(e.bufferBillySol)
+
+	// Trim saved ticks to at most 'window' most recent entries
 	n := len(saved)
-	if n > len(e.buffer) {
-		saved = saved[n-len(e.buffer):]
-		n = len(e.buffer)
+	if n > window {
+		saved = saved[n-window:]
+		n = window
 	}
 
+	// Update count and position
 	e.count = n
-	e.pos = n % len(e.buffer)
+	e.pos = n % window
 
-	// rebuild sums & buffer from Spot field
-	e.sum = 0
-	e.sumsq = 0
+	// Reset rolling sums for all three series
+	e.sumBillySol, e.sumsqBillySol = 0, 0
+	e.sumBillyUSD, e.sumsqBillyUSD = 0, 0
+	e.sumSolUSD, e.sumsqSolUSD = 0, 0
+
+	// Rebuild buffers, sums, and tsBuf
 	for i := 0; i < n; i++ {
-		spot := saved[i].Prices.Spot
-		e.buffer[i] = spot
-		e.tsBuf[i] = saved[i].TS
-		e.sum += spot
-		e.sumsq += spot * spot
+		tick := saved[i]
+		bs := tick.Prices.BillySol
+		bu := tick.Prices.BillyUSD
+		su := tick.Prices.SolUSD
+
+		e.bufferBillySol[i] = bs
+		e.bufferBillyUSD[i] = bu
+		e.bufferSolUSD[i] = su
+		e.tsBuf[i] = tick.TS
+
+		e.sumBillySol += bs
+		e.sumsqBillySol += bs * bs
+
+		e.sumBillyUSD += bu
+		e.sumsqBillyUSD += bu * bu
+
+		e.sumSolUSD += su
+		e.sumsqSolUSD += su * su
 	}
 
-	e.ema = emaVal
-	e.sigma = sigmaVal
+	// Restore EMA and σ values
+	e.emaBillySol = emaBillySol
+	e.emaBillyUSD = emaBillyUSD
+	e.emaSolUSD = emaSolUSD
+	e.sigmaBillySol = sigmaBillySol
+	e.sigmaBillyUSD = sigmaBillyUSD
+	e.sigmaSolUSD = sigmaSolUSD
+
 	e.lastUpdated = updated
 }
