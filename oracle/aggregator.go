@@ -156,8 +156,17 @@ func (ag *Aggregator) FetchAll(ctx context.Context) (PriceData, error) {
 
 	wg.Wait()
 
+	// BILLY→SOL is required
 	if len(hitsBillySol) == 0 {
 		return PriceData{}, fmt.Errorf("all sources failed or returned zero BILLY→SOL: %v", errs)
+	}
+	// BILLY→USD is required
+	if len(hitsBillyUSD) == 0 {
+		return PriceData{}, fmt.Errorf("all sources failed or returned zero BILLY→USD: %v", errs)
+	}
+	// SOL→USD is required
+	if len(hitsSolUSD) == 0 {
+		return PriceData{}, fmt.Errorf("all sources failed or returned zero SOL→USD: %v", errs)
 	}
 
 	// average BILLY→SOL
@@ -168,28 +177,23 @@ func (ag *Aggregator) FetchAll(ctx context.Context) (PriceData, error) {
 	meanBillySol := sum / float64(len(hitsBillySol))
 
 	// average BILLY→USD
-	meanBillyUSD := 0.0
-	if len(hitsBillyUSD) > 0 {
-		sum = 0.0
-		for _, v := range hitsBillyUSD {
-			sum += v
-		}
-		meanBillyUSD = sum / float64(len(hitsBillyUSD))
+	sum = 0.0
+	for _, v := range hitsBillyUSD {
+		sum += v
 	}
+	meanBillyUSD := sum / float64(len(hitsBillyUSD))
 
 	// average SOL→USD
-	meanSolUSD := 0.0
-	if len(hitsSolUSD) > 0 {
-		sum = 0.0
-		for _, v := range hitsSolUSD {
-			sum += v
-		}
-		meanSolUSD = sum / float64(len(hitsSolUSD))
+	sum = 0.0
+	for _, v := range hitsSolUSD {
+		sum += v
 	}
+	meanSolUSD := sum / float64(len(hitsSolUSD))
 
 	return PriceData{
 		BillySol: meanBillySol,
 		BillyUSD: meanBillyUSD,
 		SolUSD:   meanSolUSD,
 	}, nil
+
 }

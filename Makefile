@@ -2,7 +2,7 @@
 BINARY := bb1
 
 # Version tag (short git SHA)
-VERSION := v1.1.0
+VERSION := v1.1.1
 
 # Full image name (override REGISTRY as needed)
 REGISTRY ?= docker.io/wateim

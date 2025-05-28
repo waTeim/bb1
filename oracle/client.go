@@ -48,7 +48,6 @@ type jupiterResponse struct {
 // ErrNotReady indicates all upstreams have been down for too long.
 var ErrNotReady = errors.New("service not ready: all price sources down >120s")
 
-// NewPriceClient returns a PriceClient with default timeout and Coingecko API key.
 // NewPriceClient returns a PriceClient with default timeout and Coingecko API key/type.
 func NewPriceClient(httpClient *http.Client, key, keyType string) *PriceClient {
 	if httpClient == nil {
